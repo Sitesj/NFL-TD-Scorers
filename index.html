@@ -5,30 +5,28 @@
   <title>NFL — This Week's TD Scorers</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root {
-      --text:#111; --muted:#666; --rule:#eee;
-    }
-    body { font: 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; color: var(--text); }
-    h1 { margin: .25rem 0 .5rem }
-    #stamp { color: var(--muted); margin-bottom: 1rem }
-    .small { color: var(--muted); font-size: .9em }
-    ul { list-style: none; padding: 0; margin: 0 }
-    li { padding: .5rem 0; border-bottom: 1px solid var(--rule); display: flex; align-items: center; gap: .6rem; }
-    .logo { width: 28px; height: 28px; object-fit: contain; flex: 0 0 28px; }
-    .row { display: flex; flex-direction: column; }
-    .line { display: inline-block; }
-    #status { margin: .5rem 0 1rem; }
+    :root { --text:#111; --muted:#666; --rule:#eee; }
+    body { font:16px system-ui,-apple-system,Segoe UI,Roboto,sans-serif; margin:2rem; color:var(--text); }
+    h1 { margin:.25rem 0 .5rem }
+    #stamp { color:var(--muted); margin-bottom:1rem }
+    .small { color:var(--muted); font-size:.9em }
+    ul { list-style:none; padding:0; margin:0 }
+    li { padding:.5rem 0; border-bottom:1px solid var(--rule); display:flex; align-items:center; gap:.6rem; }
+    .logo { width:28px; height:28px; object-fit:contain; flex:0 0 28px; }
+    .row { display:flex; flex-direction:column; }
+    .line { display:inline-block; }
+    #status { margin:.5rem 0 1rem; }
     #attrib {
-      background: #f6f6f6; border: 1px solid var(--rule); padding: 8px 12px; border-radius: 8px;
-      font-size: .9em; color: var(--muted); margin-bottom: 12px;
+      background:#f6f6f6; border:1px solid var(--rule); padding:8px 12px; border-radius:8px;
+      font-size:.9em; color:var(--muted); margin-bottom:12px;
     }
-    #attrib a { color: inherit; text-decoration: underline; }
+    #attrib a { color:inherit; text-decoration:underline; }
   </style>
 </head>
 <body>
   <div id="attrib">Data source: ESPN public score APIs (unofficial/open endpoints).</div>
 
-  <h1>TD Scorers — Current Week</h1>
+  <h1 id="title">TD Scorers — Current Week</h1>
   <div id="stamp" class="small"></div>
   <div id="status">Loading…</div>
   <ul id="list"></ul>
@@ -38,11 +36,11 @@
     const status = document.getElementById('status');
     const list = document.getElementById('list');
     const stamp = document.getElementById('stamp');
+    const titleEl = document.getElementById('title');
 
-    // Build a map of team -> logo from the scoreboard payload (no hardcoding)
-    const teamMetaById = new Map();     // id -> {abbr, logo}
-    const teamMetaByAbbr = new Map();   // abbr -> {abbr, logo}
+    const TOTAL_REG_WEEKS = 18; // NFL regular season length
 
+    // Categorize touchdown plays
     function tdCategory(p) {
       const txt = (p.text || '').toLowerCase();
       const players = Array.isArray(p.players) ? p.players : [];
@@ -63,22 +61,38 @@
       return 'TD';
     }
 
+    // Build a map of team -> logo from the scoreboard payload
+    const teamMetaById = new Map();   // id -> {abbr, logo}
+    const teamMetaByAbbr = new Map(); // abbr -> {abbr, logo}
+
     try {
-      // 1) Current week's games
+      // 1) Current week's scoreboard (ESPN's "current week" aligns to Thu–Wed)
       const scoreboardUrl = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
       const sb = await fetch(scoreboardUrl).then(r => r.json());
+
+      // Set dynamic week title
+      const seasonType = sb?.season?.type;   // 1=Pre, 2=Reg, 3=Post
+      const weekNum = sb?.week?.number;
+      let label = 'Current Week';
+      if (seasonType === 2 && weekNum) {
+        label = `Week ${weekNum} of ${TOTAL_REG_WEEKS}`;
+      } else if (seasonType === 1 && weekNum) {
+        label = `Preseason Week ${weekNum}`;
+      } else if (seasonType === 3 && weekNum) {
+        label = `Postseason Week ${weekNum}`;
+      }
+      titleEl.textContent = `TD Scorers — ${label}`;
+
       const events = Array.isArray(sb.events) ? sb.events : [];
       if (!events.length) throw new Error('No games this week (yet).');
 
-      // Extract team meta (abbr + logo) from the scoreboard once
+      // Extract team meta once
       for (const ev of events) {
-        const comp = ev?.competitions?.[0];
-        const comps = comp?.competitors || [];
+        const comps = ev?.competitions?.[0]?.competitors || [];
         for (const c of comps) {
           const t = c?.team;
           if (!t) continue;
           const id = t.id, abbr = t.abbreviation;
-          // ESPN often provides a 'logo' field or 'logos' array; prefer the square one if present
           const logo = (t.logos && t.logos[0]?.href) || t.logo || null;
           if (id && abbr) {
             if (!teamMetaById.has(id)) teamMetaById.set(id, { abbr, logo });
@@ -87,8 +101,8 @@
         }
       }
 
-      // 2) Pull each game's summary and aggregate TDs
-      const byPlayer = new Map(); // key -> { total, byType: {...}, logo, abbr }
+      // 2) Summaries -> TD aggregation
+      const byPlayer = new Map(); // key -> { total, byType:{}, logo, abbr }
       const seenPlays = new Set();
 
       function addTD(name, teamAbbr, logoUrl) {
@@ -130,14 +144,11 @@
             const m = /([A-Z][\w.\-'\s]+)\s+\d+\s*(yd|yard)/i.exec(p.text || '');
             row = addTD(m ? m[1].trim() : 'Unknown', meta.abbr || teamAbbr, meta.logo);
           }
-
-          // bump the category count
-          const k = cat;
-          row.byType[k] = (row.byType[k] || 0) + 1;
+          row.byType[cat] = (row.byType[cat] || 0) + 1;
         }
       }
 
-      // Gentle concurrency (6 summaries at a time)
+      // Gentle concurrency (6 at a time)
       for (let i = 0; i < events.length; i += 6) {
         await Promise.all(events.slice(i, i + 6).map(processEvent));
       }
@@ -145,16 +156,15 @@
       // 3) Render
       const rows = [...byPlayer.entries()]
         .sort((a, b) => b[1].total - a[1].total)
-        .map(([label, info]) => {
+        .map(([label2, info]) => {
           const breakdown = Object.entries(info.byType)
             .sort((a,b)=> b[1]-a[1])
             .map(([k,v]) => `${k.replace(' Return',' Ret')}: ${v}`)
             .join(', ');
-
-          const logo = info.logo ? `<img class="logo" src="${info.logo}" alt="${info.abbr} logo" loading="lazy">` : `<span class="logo" aria-hidden="true"></span>`;
-
+          const logo = info.logo ? `<img class="logo" src="${info.logo}" alt="${info.abbr} logo" loading="lazy">`
+                                 : `<span class="logo" aria-hidden="true"></span>`;
           return `<li>${logo}<span class="row">
-              <span class="line"><strong>${label}</strong> — ${info.total} TD${info.total>1?'s':''}</span>
+              <span class="line"><strong>${label2}</strong> — ${info.total} TD${info.total>1?'s':''}</span>
               ${breakdown ? `<span class="line small">[${breakdown}]</span>` : ''}
             </span></li>`;
         });
