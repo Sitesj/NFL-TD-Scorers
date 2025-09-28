@@ -5,16 +5,29 @@
   <title>NFL — This Week's TD Scorers</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font: 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
-    h1 { margin: 0 0 .25rem }
-    #stamp { color:#666; margin-bottom:1rem }
-    .small { color:#666; font-size:.9em }
+    :root {
+      --text:#111; --muted:#666; --rule:#eee;
+    }
+    body { font: 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; color: var(--text); }
+    h1 { margin: .25rem 0 .5rem }
+    #stamp { color: var(--muted); margin-bottom: 1rem }
+    .small { color: var(--muted); font-size: .9em }
     ul { list-style: none; padding: 0; margin: 0 }
-    li { padding: .4rem 0; border-bottom: 1px solid #eee }
+    li { padding: .5rem 0; border-bottom: 1px solid var(--rule); display: flex; align-items: center; gap: .6rem; }
+    .logo { width: 28px; height: 28px; object-fit: contain; flex: 0 0 28px; }
+    .row { display: flex; flex-direction: column; }
+    .line { display: inline-block; }
     #status { margin: .5rem 0 1rem; }
+    #attrib {
+      background: #f6f6f6; border: 1px solid var(--rule); padding: 8px 12px; border-radius: 8px;
+      font-size: .9em; color: var(--muted); margin-bottom: 12px;
+    }
+    #attrib a { color: inherit; text-decoration: underline; }
   </style>
 </head>
 <body>
+  <div id="attrib">Data source: ESPN public score APIs (unofficial/open endpoints).</div>
+
   <h1>TD Scorers — Current Week</h1>
   <div id="stamp" class="small"></div>
   <div id="status">Loading…</div>
@@ -26,20 +39,21 @@
     const list = document.getElementById('list');
     const stamp = document.getElementById('stamp');
 
-    // Categorize touchdown plays
+    // Build a map of team -> logo from the scoreboard payload (no hardcoding)
+    const teamMetaById = new Map();     // id -> {abbr, logo}
+    const teamMetaByAbbr = new Map();   // abbr -> {abbr, logo}
+
     function tdCategory(p) {
       const txt = (p.text || '').toLowerCase();
       const players = Array.isArray(p.players) ? p.players : [];
       const types = players.map(x => (x && x.type && x.type.text ? x.type.text.toLowerCase() : '')).join(' ');
 
-      // Prefer structured hints in players[].type.text
       if (/receive|reception|receiver/.test(types)) return 'Receiving';
       if (/rush|rusher|run/.test(types)) return 'Rushing';
       if (/kickoff return|punt return|returner/.test(types)) return 'Return';
       if (/interception/.test(types)) return 'INT Return';
       if (/fumble/.test(types)) return 'Fumble Return';
 
-      // Fallback to description text
       if (/(pass|from)/.test(txt) && !/interception/.test(txt)) return 'Receiving';
       if (/\brun|\brush|\bkeeper/.test(txt)) return 'Rushing';
       if (/kickoff return|punt return/.test(txt)) return 'Return';
@@ -56,16 +70,33 @@
       const events = Array.isArray(sb.events) ? sb.events : [];
       if (!events.length) throw new Error('No games this week (yet).');
 
+      // Extract team meta (abbr + logo) from the scoreboard once
+      for (const ev of events) {
+        const comp = ev?.competitions?.[0];
+        const comps = comp?.competitors || [];
+        for (const c of comps) {
+          const t = c?.team;
+          if (!t) continue;
+          const id = t.id, abbr = t.abbreviation;
+          // ESPN often provides a 'logo' field or 'logos' array; prefer the square one if present
+          const logo = (t.logos && t.logos[0]?.href) || t.logo || null;
+          if (id && abbr) {
+            if (!teamMetaById.has(id)) teamMetaById.set(id, { abbr, logo });
+            if (!teamMetaByAbbr.has(abbr)) teamMetaByAbbr.set(abbr, { abbr, logo });
+          }
+        }
+      }
+
       // 2) Pull each game's summary and aggregate TDs
-      const byPlayer = new Map(); // "Name (TEAM)" -> { total, byType: {Receiving: n, ...} }
+      const byPlayer = new Map(); // key -> { total, byType: {...}, logo, abbr }
       const seenPlays = new Set();
 
-      function addTD(name, team, cat) {
-        const key = `${name} (${team})`;
-        if (!byPlayer.has(key)) byPlayer.set(key, { total: 0, byType: {} });
+      function addTD(name, teamAbbr, logoUrl) {
+        const key = `${name} (${teamAbbr})`;
+        if (!byPlayer.has(key)) byPlayer.set(key, { total: 0, byType: {}, logo: logoUrl || '', abbr: teamAbbr });
         const row = byPlayer.get(key);
         row.total += 1;
-        row.byType[cat] = (row.byType[cat] || 0) + 1;
+        return row;
       }
 
       async function processEvent(ev) {
@@ -83,26 +114,30 @@
                        || /\btd\b|touchdown/.test((p.text || '').toLowerCase());
           if (!isTD) continue;
 
-          const teamAbbr = (p.team && p.team.abbreviation) ? p.team.abbreviation : '';
+          const teamId = p.team?.id, teamAbbr = p.team?.abbreviation || '';
+          const meta = (teamId && teamMetaById.get(teamId)) || teamMetaByAbbr.get(teamAbbr) || { abbr: teamAbbr, logo: '' };
           const cat = tdCategory(p);
 
-          // Prefer the structured primary scorer in players[]
           const players = Array.isArray(p.players) ? p.players : [];
           const primary = players.find(x =>
             x && x.type && /scorer|rush|receive|return|interception|fumble/i.test(x.type.text || '')
           );
 
-          if (primary && primary.athlete && primary.athlete.displayName) {
-            addTD(primary.athlete.displayName, teamAbbr, cat);
+          let row;
+          if (primary?.athlete?.displayName) {
+            row = addTD(primary.athlete.displayName, meta.abbr || teamAbbr, meta.logo);
           } else {
-            // Fallback: parse from free text "J. Chase 12 yd ..."
             const m = /([A-Z][\w.\-'\s]+)\s+\d+\s*(yd|yard)/i.exec(p.text || '');
-            addTD(m ? m[1].trim() : 'Unknown', teamAbbr, cat);
+            row = addTD(m ? m[1].trim() : 'Unknown', meta.abbr || teamAbbr, meta.logo);
           }
+
+          // bump the category count
+          const k = cat;
+          row.byType[k] = (row.byType[k] || 0) + 1;
         }
       }
 
-      // Fetch summaries with gentle concurrency (6 at a time)
+      // Gentle concurrency (6 summaries at a time)
       for (let i = 0; i < events.length; i += 6) {
         await Promise.all(events.slice(i, i + 6).map(processEvent));
       }
@@ -115,7 +150,13 @@
             .sort((a,b)=> b[1]-a[1])
             .map(([k,v]) => `${k.replace(' Return',' Ret')}: ${v}`)
             .join(', ');
-          return `<li><strong>${label}</strong> — ${info.total} TD${info.total>1?'s':''}${breakdown ? ` <span class="small">[${breakdown}]</span>` : ''}</li>`;
+
+          const logo = info.logo ? `<img class="logo" src="${info.logo}" alt="${info.abbr} logo" loading="lazy">` : `<span class="logo" aria-hidden="true"></span>`;
+
+          return `<li>${logo}<span class="row">
+              <span class="line"><strong>${label}</strong> — ${info.total} TD${info.total>1?'s':''}</span>
+              ${breakdown ? `<span class="line small">[${breakdown}]</span>` : ''}
+            </span></li>`;
         });
 
       list.innerHTML = rows.join('') || '<li>No TDs recorded yet.</li>';
