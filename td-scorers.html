@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>NFL — This Week's TD Scorers</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font: 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+    h1 { margin: 0 0 .25rem }
+    #stamp { color:#666; margin-bottom:1rem }
+    .small { color:#666; font-size:.9em }
+    ul { list-style: none; padding: 0; margin: 0 }
+    li { padding: .4rem 0; border-bottom: 1px solid #eee }
+    #status { margin: .5rem 0 1rem; }
+  </style>
+</head>
+<body>
+  <h1>TD Scorers — Current Week</h1>
+  <div id="stamp" class="small"></div>
+  <div id="status">Loading…</div>
+  <ul id="list"></ul>
+
+  <script>
+  (async function () {
+    const status = document.getElementById('status');
+    const list = document.getElementById('list');
+    const stamp = document.getElementById('stamp');
+
+    // Categorize touchdown plays
+    function tdCategory(p) {
+      const txt = (p.text || '').toLowerCase();
+      const players = Array.isArray(p.players) ? p.players : [];
+      const types = players.map(x => (x && x.type && x.type.text ? x.type.text.toLowerCase() : '')).join(' ');
+
+      // Prefer structured hints in players[].type.text
+      if (/receive|reception|receiver/.test(types)) return 'Receiving';
+      if (/rush|rusher|run/.test(types)) return 'Rushing';
+      if (/kickoff return|punt return|returner/.test(types)) return 'Return';
+      if (/interception/.test(types)) return 'INT Return';
+      if (/fumble/.test(types)) return 'Fumble Return';
+
+      // Fallback to description text
+      if (/(pass|from)/.test(txt) && !/interception/.test(txt)) return 'Receiving';
+      if (/\brun|\brush|\bkeeper/.test(txt)) return 'Rushing';
+      if (/kickoff return|punt return/.test(txt)) return 'Return';
+      if (/interception.*return|pick[- ]?six/.test(txt)) return 'INT Return';
+      if (/fumble.*return|fumble.*recovery/.test(txt)) return 'Fumble Return';
+
+      return 'TD';
+    }
+
+    try {
+      // 1) Current week's games
+      const scoreboardUrl = 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard';
+      const sb = await fetch(scoreboardUrl).then(r => r.json());
+      const events = Array.isArray(sb.events) ? sb.events : [];
+      if (!events.length) throw new Error('No games this week (yet).');
+
+      // 2) Pull each game's summary and aggregate TDs
+      const byPlayer = new Map(); // "Name (TEAM)" -> { total, byType: {Receiving: n, ...} }
+      const seenPlays = new Set();
+
+      function addTD(name, team, cat) {
+        const key = `${name} (${team})`;
+        if (!byPlayer.has(key)) byPlayer.set(key, { total: 0, byType: {} });
+        const row = byPlayer.get(key);
+        row.total += 1;
+        row.byType[cat] = (row.byType[cat] || 0) + 1;
+      }
+
+      async function processEvent(ev) {
+        const id = ev.id || (ev.uid && ev.uid.split('~').pop());
+        if (!id) return;
+        const summaryUrl = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/summary?event=${id}`;
+        const data = await fetch(summaryUrl).then(r => r.json());
+        const plays = Array.isArray(data.scoringPlays) ? data.scoringPlays : [];
+        for (const p of plays) {
+          const unique = p.id || `${id}:${p.clock && p.clock.displayValue}:${p.text}`;
+          if (seenPlays.has(unique)) continue;
+          seenPlays.add(unique);
+
+          const isTD = String(p.type && p.type.text || '').toLowerCase().includes('touchdown')
+                       || /\btd\b|touchdown/.test((p.text || '').toLowerCase());
+          if (!isTD) continue;
+
+          const teamAbbr = (p.team && p.team.abbreviation) ? p.team.abbreviation : '';
+          const cat = tdCategory(p);
+
+          // Prefer the structured primary scorer in players[]
+          const players = Array.isArray(p.players) ? p.players : [];
+          const primary = players.find(x =>
+            x && x.type && /scorer|rush|receive|return|interception|fumble/i.test(x.type.text || '')
+          );
+
+          if (primary && primary.athlete && primary.athlete.displayName) {
+            addTD(primary.athlete.displayName, teamAbbr, cat);
+          } else {
+            // Fallback: parse from free text "J. Chase 12 yd ..."
+            const m = /([A-Z][\w.\-'\s]+)\s+\d+\s*(yd|yard)/i.exec(p.text || '');
+            addTD(m ? m[1].trim() : 'Unknown', teamAbbr, cat);
+          }
+        }
+      }
+
+      // Fetch summaries with gentle concurrency (6 at a time)
+      for (let i = 0; i < events.length; i += 6) {
+        await Promise.all(events.slice(i, i + 6).map(processEvent));
+      }
+
+      // 3) Render
+      const rows = [...byPlayer.entries()]
+        .sort((a, b) => b[1].total - a[1].total)
+        .map(([label, info]) => {
+          const breakdown = Object.entries(info.byType)
+            .sort((a,b)=> b[1]-a[1])
+            .map(([k,v]) => `${k.replace(' Return',' Ret')}: ${v}`)
+            .join(', ');
+          return `<li><strong>${label}</strong> — ${info.total} TD${info.total>1?'s':''}${breakdown ? ` <span class="small">[${breakdown}]</span>` : ''}</li>`;
+        });
+
+      list.innerHTML = rows.join('') || '<li>No TDs recorded yet.</li>';
+      status.textContent = '';
+      stamp.textContent = `Last fetched: ${new Date().toLocaleString()}`;
+    } catch (err) {
+      console.error(err);
+      status.textContent = 'Could not load TD scorers.';
+    }
+  })();
+  </script>
+</body>
+</html>
